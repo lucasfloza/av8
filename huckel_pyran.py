@@ -1,220 +1,328 @@
 # -*- coding: utf-8 -*-
 """
-Hückel para o Pirano (2H), apenas orbitais pz.
-- Constrói a matriz de Hückel
-- Calcula autovalores/autovetores (QR)
-- Gera o diagrama de níveis e salva a figura
-- Faz o preenchimento eletrônico
-- Calcula coeficientes dos MOs, populações π e ordens de ligação π
+Hückel (π, pz) para o 2H-Pirano.
 """
+
+from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
+import sympy as sp
+from typing import Tuple, Dict, List
+from collections import OrderedDict
+from matplotlib.lines import Line2D
 
-# --- Parâmetros do modelo Hückel ---
-coulomb_integral_carbon = 0.0           # α (referência de energia dos carbonos)
-resonance_integral_CC   = -1.0          # β (C–C), geralmente negativo
-coulomb_shift_oxygen    = 1.5           # h_O  (α_O = α + h_O * β)
-resonance_factor_CO     = 1.0           # k_CO (β_CO = k_CO * β)
-num_pi_electrons        = 6             # nº de elétrons π
+# Numeração e conectividade (0: O, 1..5: C)
+ATOM_LABELS = ["O(1)", "C(2)", "C(3)", "C(4)", "C(5)", "C(6)"]
+RING_EDGES = [(0,1),(1,2),(2,3),(3,4),(4,5),(5,0)]  # ligações do anel (1–2–3–4–5–6–1)
 
-# Conectividade e rótulos
-ring_connections = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0)]
-atom_labels = ['O(1)', 'C(2)', 'C(3)', 'C(4)', 'C(5)', 'C(6)']
+# -------------------------
+# Constantes
+# -------------------------
+ALPHA_CARBON: float = 0.0              # α (referência de energia dos C)
+BETA_CC: float = -1.0                  # β (C–C), negativo
+H_OXYGEN: float = 1.5                  # h_O  (α_O = α + h_O * β)
+K_CO: float = 1.0                      # k_CO (β_CO = k_CO * β)
+N_PI_ELECTRONS: int = 6                # nº de elétrons π (2H-pirano)
 
-# --- Construção da matriz de Hückel ---
-num_atoms = 6
-huckel_matrix = np.zeros((num_atoms, num_atoms), dtype=float)
+# -------------------------
+# 1 - Determinante secular
+# -------------------------
+def print_secular_determinant():
+    try:
+        import sympy as sp
+    except Exception as e:
+        print("[1] Determinante secular: sympy indisponível.", e)
+        return
 
-# Diagonais (O e Cs)
-huckel_matrix[0, 0] = coulomb_integral_carbon + coulomb_shift_oxygen * resonance_integral_CC
-for i in range(1, num_atoms):
-    huckel_matrix[i, i] = coulomb_integral_carbon
+    eps = sp.symbols("eps")
+    alpha_C, beta_CC, h_O, k_CO = sp.symbols("alpha_C beta_CC h_O k_CO")
 
-# Ligações do anel
-for i, j in ring_connections:
-    if 0 in (i, j):  # envolve oxigênio
-        huckel_matrix[i, j] = huckel_matrix[j, i] = resonance_factor_CO * resonance_integral_CC
-    else:            # ligação C–C
-        huckel_matrix[i, j] = huckel_matrix[j, i] = resonance_integral_CC
+    matriz = sp.zeros(6)
+    matriz[0,0] = alpha_C + h_O*beta_CC
+    for i in range(1,6):
+        matriz[i,i] = alpha_C
+    for i,j in RING_EDGES:
+        matriz[i,j] = matriz[j,i] = (k_CO*beta_CC) if (0 in (i,j)) else beta_CC
 
+    E = alpha_C + eps*beta_CC
+    det_eps = sp.factor((E*sp.eye(6) - matriz).det())
+    # remove o fator beta^6 para mostrar só P(ε)
+    P_eps = sp.factor(sp.simplify(det_eps / (beta_CC**6)))
 
-def qr_eigenvalues(matrix: np.ndarray, max_iter: int = 5000, tol: float = 1e-12, with_vectors: bool = True):
-    """
-    Calcula autovalores (e opcionalmente autovetores) via iteração QR com shift simples.
+    print("\n[1] Determinante secular (forma reduzida): P(ε) =")
+    print(P_eps)
 
-    Parâmetros
-    ----------
-    matrix : np.ndarray
-        Matriz quadrada real (simétrica no caso Hückel).
-    max_iter : int
-        Máximo de iterações do método.
-    tol : float
-        Tolerância para a norma fora da diagonal (critério de parada).
-    with_vectors : bool
-        Se True, acumula Q para retornar autovetores.
+    subs = {alpha_C: ALPHA_CARBON, beta_CC: BETA_CC, h_O: H_OXYGEN, k_CO: K_CO}
+    print("\n[1] P(ε) com parâmetros atuais:")
+    print(sp.factor(P_eps.subs(subs)))
 
-    Retorna
-    -------
-    eigenvalues : np.ndarray
-        Autovalores em ordem crescente.
-    eigenvectors : np.ndarray | None
-        Autovetores por colunas, alinhados aos autovalores. None se with_vectors=False.
-    """
+# -------------------------
+# Construção da matriz com o método de Hückel
+# -------------------------
+def build_huckel_matrix() -> np.ndarray:
+
+    huckel_matrix = np.zeros((6, 6), dtype=float)
+
+    # termos on-site (diagonais)
+    huckel_matrix[0, 0] = ALPHA_CARBON + H_OXYGEN * BETA_CC  # O(1)
+    for atom_index in range(1, 6):                            # C(2) ... C(6)
+        huckel_matrix[atom_index, atom_index] = ALPHA_CARBON
+
+    # acoplamentos de primeiros vizinhos (fora da diagonal)
+    for atom_i, atom_j in RING_EDGES:
+        coupling = (K_CO * BETA_CC) if (0 in (atom_i, atom_j)) else BETA_CC
+        huckel_matrix[atom_i, atom_j] = coupling
+        huckel_matrix[atom_j, atom_i] = coupling
+
+    return huckel_matrix
+
+# -------------------------
+# Autovalores/autovetores via QR com shift simples
+# -------------------------
+def qr_eig(matrix: np.ndarray,
+           tolerance: float = 1e-12,
+           max_iterations: int = 5000) -> tuple[np.ndarray, np.ndarray]:
+
     current_matrix = matrix.copy().astype(float)
-    n = current_matrix.shape[0]
-    accumulated_Q = np.eye(n) if with_vectors else None
+    dimension = current_matrix.shape[0]
+    accumulated_Q = np.eye(dimension)
 
-    for _ in range(max_iter):
-        off_diag_norm = np.sqrt(np.sum((current_matrix - np.diag(np.diag(current_matrix)))**2))
-        if off_diag_norm < tol:
+    for iteration in range(max_iterations):
+        off_diagonal_norm = np.linalg.norm(current_matrix - np.diag(np.diag(current_matrix)))
+        if off_diagonal_norm < tolerance:
             break
-        shift = current_matrix[-1, -1]
-        Q, R = np.linalg.qr(current_matrix - shift*np.eye(n))
-        current_matrix = R @ Q + shift*np.eye(n)
-        if with_vectors:
-            accumulated_Q = accumulated_Q @ Q
 
-    eigenvalues = np.diag(current_matrix).copy()
-    idx = np.argsort(eigenvalues)
-    eigenvalues = eigenvalues[idx]
-    eigenvectors = accumulated_Q[:, idx] if with_vectors else None
+        shift = current_matrix[-1, -1]
+        q_factor, r_factor = np.linalg.qr(current_matrix - shift * np.eye(dimension))
+        current_matrix = r_factor @ q_factor + shift * np.eye(dimension)
+        accumulated_Q = accumulated_Q @ q_factor
+
+    eigenvalues_unsorted = np.diag(current_matrix).copy()
+    order_indices = np.argsort(eigenvalues_unsorted)
+    eigenvalues = eigenvalues_unsorted[order_indices]
+    eigenvectors = accumulated_Q[:, order_indices]
+
     return eigenvalues, eigenvectors
 
+# -------------------------
+# 2 - Calculando níveis de energia e plotando diagrama de níveis
+# -------------------------
+def calculating_energy_levels(eigenvalues):
+    # energias reduzidas ε = (E − α)/β
+    reduced_energies: np.ndarray = (eigenvalues - ALPHA_CARBON) / BETA_CC
 
-def pi_populations_and_bond_orders(eigenvalues: np.ndarray,
-                                   eigenvectors: np.ndarray,
-                                   connections: list[tuple[int, int]],
-                                   num_electrons: int):
-    """
-    Calcula populações π por centro e ordens de ligação π (Hückel) usando MOs ocupados.
+    # ocupação eletrônica (2 e− por MO π)
+    num_occupied_mos: int = N_PI_ELECTRONS // 2
+    homo_index: int = num_occupied_mos - 1
+    lumo_index: int | None = num_occupied_mos if num_occupied_mos < len(eigenvalues) else None
+    print("\n[2] Níveis de energia (Hückel)")
+    for k in range(len(eigenvalues)):
+        eps_k = reduced_energies[k]
+        E_k = eigenvalues[k]
+        occ_str = "2e⁻" if k <= homo_index else "0e⁻"
+        marks = []
+        if k == homo_index:
+            marks.append("HOMO")
+        if lumo_index is not None and k == lumo_index:
+            marks.append("LUMO")
+        mark_str = ", ".join(marks)
+        print(f"    MO{(k+1):>2}   {eps_k:+8.3f}          {E_k:+8.3f}          {occ_str:>3}    {mark_str}")
+    
+    plot_level_diagram(reduced_energies, homo_index, lumo_index)
+    return reduced_energies, homo_index, lumo_index
 
-    Parâmetros
-    ----------
-    eigenvalues : np.ndarray
-        Autovalores (energias) dos MOs.
-    eigenvectors : np.ndarray
-        Autovetores (coeficientes dos MOs por coluna).
-    connections : list[tuple[int,int]]
-        Lista de pares (i, j) conectados no anel (0-index).
-    num_electrons : int
-        Número total de elétrons π (2 por MO ocupado).
+# -------------------------
+# 3 - Calculando as Populações π e ordens π
+# -------------------------
+def compute_pi_properties(
+    energy_eigenvalues: np.ndarray,
+    mo_coefficients: np.ndarray,
+    atom_labels: List[str] = ATOM_LABELS,
+    ring_edges: List[Tuple[int, int]] = RING_EDGES,
+    n_pi_electrons: int = N_PI_ELECTRONS,
+) -> Tuple[np.ndarray, Dict[Tuple[int, int], float]]:
+ 
+    # Ordena por energia crescente e extrai MOs ocupados
+    sort_indices = np.argsort(energy_eigenvalues)
+    mo_coeffs_sorted = mo_coefficients[:, sort_indices]
 
-    Retorna
-    -------
-    pi_populations : np.ndarray
-        População π em cada centro (2 * soma dos c_i^2 nos MOs ocupados).
-    pi_bond_orders : dict[(int,int), float]
-        Ordem de ligação π para cada par (i+1, j+1) da lista de conexões.
-    """
-    idx = np.argsort(eigenvalues)
-    occupied_coeffs = eigenvectors[:, idx][:, :num_electrons//2]
-    pi_populations = 2.0 * np.sum(occupied_coeffs**2, axis=1)
+    num_occupied_mos = n_pi_electrons // 2
+    occupied_mos = mo_coeffs_sorted[:, :num_occupied_mos]  # colunas = MOs ocupados
 
-    pi_bond_orders = {}
-    for i, j in connections:
-        pi_bond_orders[(i+1, j+1)] = 2.0 * np.sum(occupied_coeffs[i, :] * occupied_coeffs[j, :])
-    return pi_populations, pi_bond_orders
+    # Populações π por átomo
+    pi_populations = 2.0 * np.sum(occupied_mos ** 2, axis=1)
 
+    # Ordens de ligação π nas ligações do anel
+    pi_bond_orders_indexed: Dict[Tuple[int, int], float] = OrderedDict()
+    for atom_i, atom_j in ring_edges:
+        order_ij = 2.0 * np.sum(occupied_mos[atom_i, :] * occupied_mos[atom_j, :])
+        # guarda como 1-based no dicionário de saída
+        pi_bond_orders_indexed[(atom_i + 1, atom_j + 1)] = float(order_ij)
 
-def print_populations_and_bond_orders(pi_populations: np.ndarray, pi_bond_orders: dict):
-    """
-    Imprime populações π por centro e ordens de ligação π para as ligações do anel.
-    """
-    print("\nPopulações π:")
-    for atom, pop in zip(atom_labels, pi_populations):
-        print(f"{atom:4s}: {pop:0.5f}")
+    print("\n[4] Propriedades π (apenas MOs ocupados)")
+    print(f"    Elétrons π total = {n_pi_electrons}  →  MOs ocupados = {num_occupied_mos}")
 
-    print("\nOrdens de ligação π (ligações do anel):")
-    for (i, j), val in pi_bond_orders.items():
-        print(f"{i}-{j}: {val:0.5f}")
+    # Populações π
+    print("\n[4.1] Populações π por átomo:")
+    width_name = max(len(lbl) for lbl in atom_labels)
+    for label, pop in zip(atom_labels, pi_populations):
+        print(f"    {label:<{width_name}} : {pop:8.5f}")
 
+    # Ordens de ligação π
+    print("\n[4.2] Ordens de ligação π (ligações do anel):")
+    for (i1, j1), value in pi_bond_orders_indexed.items():
+        label_i = atom_labels[i1 - 1]
+        label_j = atom_labels[j1 - 1]
+        print(f"    {i1}-{j1} ({label_i}–{label_j}) : {value:8.5f}")
 
-def plot_level_diagram(reduced_energies: np.ndarray,
-                       HOMO_index: int,
-                       LUMO_index: int | None,
-                       save_path: str = "level_diagram_pyran.png",
-                       dpi: int = 300):
-    """
-    Plota e salva o diagrama de níveis (energias reduzidas ε) com ocupação eletrônica.
+# -------------------------
+# Visualizações
+# -------------------------
+def plot_level_diagram(eps: np.ndarray, homo: int, lumo: int | None, path="level_diagram_pyran.png"):
+    occupied_color = "#1f77b4"
+    vacant_color   = "#7f7f7f"
+    ypad = 0.35
+    tol = 1e-6
 
-    Parâmetros
-    ----------
-    reduced_energies : np.ndarray
-        Energias reduzidas ε = (E - α) / β em ordem crescente.
-    HOMO_index : int
-        Índice do HOMO (0-index).
-    LUMO_index : int | None
-        Índice do LUMO (ou None se inexistente).
-    save_path : str
-        Caminho/arquivo para salvar a figura (PNG).
-    dpi : int
-        Resolução da imagem salva.
-    """
-    plt.figure(figsize=(6, 6))
-    for k, energy in enumerate(reduced_energies):
-        plt.hlines(energy, xmin=0.2, xmax=0.8, linewidth=2)
-        occupancy = 2 if k <= HOMO_index else 0
-        for m in range(occupancy):
-            plt.plot(0.5 + (m-0.5)*0.15, energy, 'o')
-        label = f"MO{k+1}"
-        if k == HOMO_index:
+    # Agrupa níveis degenerados
+    unique_levels: list[float] = []
+    groups: list[list[int]] = []
+    for k, e in enumerate(eps):
+        for gi, ge in enumerate(unique_levels):
+            if abs(e - ge) < tol:
+                groups[gi].append(k)
+                break
+        else:
+            unique_levels.append(e)
+            groups.append([k])
+
+    fig, ax = plt.subplots(figsize=(7.2, 6.2))
+    right_texts = []
+
+    for g in groups:
+        e_level = eps[g[0]]
+        deg = len(g)
+
+        # Ocupação do grupo:
+        # - fully_occ: todos índices <= HOMO
+        # - partially: algum <= HOMO e algum > HOMO
+        fully_occ = all(idx <= homo for idx in g)
+        partially = (any(idx <= homo for idx in g) and not fully_occ)
+
+        line_style = "-" if fully_occ else "--"
+        line_color = occupied_color if fully_occ else vacant_color
+
+        ax.hlines(e_level, 0.2, 0.8, colors=line_color,
+                  linestyles=line_style, linewidth=2)
+
+        if fully_occ:
+            ax.plot([0.44, 0.56], [e_level, e_level], "o", ms=6, color=occupied_color)
+        elif partially:
+            ax.plot(0.44, e_level, "o", ms=6, color=occupied_color)
+            ax.plot(0.56, e_level, "o", ms=6, mfc="none", mec=vacant_color, color=vacant_color)
+        else:
+            ax.plot(0.5, e_level, "o", ms=6, mfc="none", mec=vacant_color, color=vacant_color)
+
+        label = f"MO{g[0]+1}"
+        if homo in g:
             label += " (HOMO)"
-        if LUMO_index is not None and k == LUMO_index:
+        if lumo is not None and lumo in g:
             label += " (LUMO)"
-        plt.text(0.82, energy, f"{label}\nε={energy:.3f}", va='center', fontsize=9)
+        if deg > 1:
+            label += f" ×{deg}"
 
-    plt.ylim(min(reduced_energies)-0.5, max(reduced_energies)+0.5)
-    plt.xlim(0, 1)
-    plt.ylabel("Energia reduzida ε = (E - α)/β")
-    plt.title("Diagrama de níveis (Hückel) – Pirano (2H)")
-    plt.xticks([])
-    plt.tight_layout()
+        txt = ax.text(1.02, e_level, f"{label}\nε={e_level:.3f}",
+                      va="center", ha="left",
+                      transform=ax.get_yaxis_transform(), clip_on=False)
+        right_texts.append(txt)
 
-    # >>> salvar figura <<<
-    plt.savefig(save_path, dpi=dpi, bbox_inches="tight")
+    # Gap HOMO–LUMO (à esquerda)
+    if lumo is not None and homo is not None:
+        y_homo = eps[homo]
+        y_lumo = eps[lumo]
+        y_low, y_high = (min(y_homo, y_lumo), max(y_homo, y_lumo))
+        x_gap = 0.2
+        ax.vlines(x_gap, y_low, y_high, linestyles=":", colors="k")
+        delta_eps = abs(y_lumo - y_homo)
+        ax.text(x_gap + 0.12, (y_low + y_high)/2, f"Δε = {delta_eps:.3f}",
+                va="center", ha="right", fontsize=9)
+
+    ax.set_ylabel("Energia reduzida ε = (E − α)/β")
+    ax.set_xticks([])
+    ax.set_ylim(min(eps) - ypad, max(eps) + ypad)
+    ax.set_title("Diagrama de níveis (Hückel) – Pirano (2H)")
+    ax.grid(axis="y", alpha=0.2)
+
+    legend_elems = [
+        Line2D([0],[0], marker='o', linestyle='-',  color=occupied_color, label='ocupado (2e⁻)'),
+        Line2D([0],[0], marker='o', mfc='none', mec=vacant_color,
+               linestyle='--', color=vacant_color, label='desocupado (0e⁻)'),
+    ]
+    legend = ax.legend(handles=legend_elems, loc='upper center',
+                       bbox_to_anchor=(0.5, -0.14), ncol=2, frameon=False)
+
+    # Margens para caber rótulos e legenda
+    fig.subplots_adjust(right=0.82, bottom=0.22)
+
+    fig.savefig(path, dpi=300, bbox_inches="tight",
+                bbox_extra_artists=right_texts + [legend], pad_inches=0.2)
     plt.show()
-    print(f"Diagrama salvo em: {save_path}")
+
+def plot_mo_bars(C: np.ndarray, labels: list[str], k: int, title: str, path: str):
+    plt.figure(figsize=(6,3))
+    plt.axhline(0, lw=1)
+    plt.bar(range(len(labels)), C[:,k])
+    plt.xticks(range(len(labels)), labels)
+    plt.ylabel("coeficiente c_i"); plt.title(title)
+    plt.tight_layout(); plt.savefig(path, dpi=300, bbox_inches="tight"); plt.show()
+
+def main():
+    print("Molécula: 2H-Pirano (anel de 6 membros com 1 O). Numeração: O(1), C(2)–C(6).")
+    print("Presente como heteroaromático em intermediários de açúcares e derivados furânicos.\n")
+
+    # (1) Determinante secular
+    print_secular_determinant()
+
+    # (2) Níveis de energia via QR (fallback para eigh) + diagrama de níveis
+    huckel_matrix: np.ndarray = build_huckel_matrix()
+    try:
+        eigenvalues, eigenvectors = qr_eig(huckel_matrix)
+    except Exception:
+        # fallback numérico
+        eigenvalues, eigenvectors = np.linalg.eigh(huckel_matrix)
+
+    reduced_energies, homo_index, lumo_index = calculating_energy_levels(eigenvalues)
 
 
-def print_huckel_matrix_and_levels(huckel_matrix: np.ndarray, reduced_energies: np.ndarray,
-                                   HOMO_index: int, LUMO_index: int | None):
-    """
-    Imprime a matriz de Hückel e a lista de níveis (ε), marcando HOMO/LUMO.
-    """
-    print("\nMatriz de Hückel H:\n", huckel_matrix)
-    print("\nNíveis (ε):")
-    for k, energy in enumerate(reduced_energies):
-        mark = ""
-        if k == HOMO_index:
-            mark = "  <= HOMO"
-        elif LUMO_index is not None and k == LUMO_index:
-            mark = "  <= LUMO"
-        print(f"MO{k+1}: ε = {energy:.6f}{mark}")
+    print("\n[3] Orbitais moleculares (ε e combinação linear):")
+    C = eigenvectors.copy()
+    for j in range(C.shape[1]):
+        i_max = np.argmax(np.abs(C[:,j]))
+        if C[i_max,j] < 0: C[:,j] *= -1
 
+    for k in range(C.shape[1]):
+        terms = "  ".join([f"{C[i,k]:+0.3f}|{ATOM_LABELS[i]}>" for i in range(C.shape[0])])
+        print(f"MO{k+1} (ε={reduced_energies[k]:.3f}): {terms}")
 
-# --- Autovalores/autovetores e energias reduzidas ---
-eigenvalues, eigenvectors = qr_eigenvalues(huckel_matrix, with_vectors=True)
-reduced_energies = (eigenvalues - coulomb_integral_carbon) / resonance_integral_CC
+    # (4) populações π por átomo e ordens π por ligação
+    compute_pi_properties(
+        energy_eigenvalues=eigenvalues,
+        mo_coefficients=eigenvectors,
+        atom_labels=ATOM_LABELS,
+        ring_edges=RING_EDGES,
+        n_pi_electrons=N_PI_ELECTRONS,
+    )    
 
-# --- Preenchimento eletrônico ---
-num_occupied_MOs = num_pi_electrons // 2
-HOMO_index = num_occupied_MOs - 1
-LUMO_index = num_occupied_MOs if num_occupied_MOs < num_atoms else None
+    # (5) esboços HOMO e LUMO
+    plot_mo_bars(C, ATOM_LABELS, homo_index, "HOMO – coeficientes por átomo", "pyran_HOMO_coeffs.png")
+    if lumo_index is not None:
+        plot_mo_bars(C, ATOM_LABELS, lumo_index, "LUMO – coeficientes por átomo", "pyran_LUMO_coeffs.png")
 
-# --- Ajuste de sinal dos vetores próprios para consistência visual ---
-MO_coefficients = eigenvectors.copy()
-for j in range(num_atoms):
-    max_index = np.argmax(np.abs(MO_coefficients[:, j]))
-    if MO_coefficients[max_index, j] < 0:
-        MO_coefficients[:, j] *= -1.0
+    # resumo final
+    print("\nResumo:")
+    print("• Matriz de Hückel:\n", huckel_matrix)
+    print("• Níveis (ε):", ", ".join([f"{e:.6f}" for e in reduced_energies]))
+    print(f"• HOMO = MO{homo_index+1}, LUMO = MO{lumo_index+1 if lumo_index is not None else '—'}")
 
-# --- Populações π e ordens de ligação π ---
-pi_populations, pi_bond_orders = pi_populations_and_bond_orders(
-    eigenvalues, eigenvectors, ring_connections, num_pi_electrons
-)
-
-# --- Execução ---
-print_populations_and_bond_orders(pi_populations, pi_bond_orders)
-plot_level_diagram(reduced_energies, HOMO_index, LUMO_index,
-                   save_path="level_diagram_pyran.png", dpi=300)
-print_huckel_matrix_and_levels(huckel_matrix, reduced_energies, HOMO_index, LUMO_index)
+if __name__ == "__main__":
+    main()
