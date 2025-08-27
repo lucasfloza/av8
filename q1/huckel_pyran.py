@@ -178,7 +178,7 @@ def compute_pi_properties(
 # -------------------------
 # Visualizações
 # -------------------------
-def plot_level_diagram(eps: np.ndarray, homo: int, lumo: int | None, path="level_diagram_pyran.png"):
+def plot_level_diagram(eps: np.ndarray, homo: int, lumo: int | None, path="./q1/level_diagram_pyran.png"):
     occupied_color = "#1f77b4"
     vacant_color   = "#7f7f7f"
     ypad = 0.35
@@ -314,9 +314,9 @@ def main():
     )    
 
     # (5) esboços HOMO e LUMO
-    plot_mo_bars(C, ATOM_LABELS, homo_index, "HOMO – coeficientes por átomo", "pyran_HOMO_coeffs.png")
+    plot_mo_bars(C, ATOM_LABELS, homo_index, "HOMO – coeficientes por átomo", "./q1/pyran_HOMO_coeffs.png")
     if lumo_index is not None:
-        plot_mo_bars(C, ATOM_LABELS, lumo_index, "LUMO – coeficientes por átomo", "pyran_LUMO_coeffs.png")
+        plot_mo_bars(C, ATOM_LABELS, lumo_index, "LUMO – coeficientes por átomo", "./q1/pyran_LUMO_coeffs.png")
 
     # resumo final
     print("\nResumo:")
