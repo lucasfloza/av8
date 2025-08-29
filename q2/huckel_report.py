@@ -8,9 +8,9 @@ from matplotlib.lines import Line2D
 # Parameters
 ALPHA_C = 0.0
 BETA_CC = -2.5
-ALPHA_N = 0.0
-BETA_CN = -2.5
-BETA_NN = -2.5
+ALPHA_N = −1.25
+BETA_CN = −2.25
+BETA_NN = −2.25
 N_ELECTRONS_PER_SITE = 1
 
 NUM_SITES = 10
